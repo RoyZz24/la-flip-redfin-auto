@@ -2,8 +2,8 @@ name: Daily Redfin Scrape for LA Flip
 
 on:
   schedule:
-    - cron: '0 15 * * *'   # LA 时间每天早上 7:00 自动跑（UTC 15:00）
-  workflow_dispatch:       # 允许你手动点击“Run workflow”测试
+    - cron: '0 15 * * *'   # LA 时间每天早上 7:00 自动跑
+  workflow_dispatch:       # 手动测试按钮
 
 jobs:
   scrape:
@@ -17,7 +17,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install system dependencies for Selenium + Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb google-chrome-stable
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -25,4 +30,7 @@ jobs:
       - name: Run Redfin Scraper
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: python main.py
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+          export DISPLAY=:99
+          python main.py

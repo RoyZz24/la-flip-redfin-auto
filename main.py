@@ -46,13 +46,13 @@ def scrape_redfin(zip_code, is_sold=False):
     print(f"正在抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
     
     driver.get(url)
-    time.sleep(15 + random.uniform(0, 5))
-    for _ in range(6):
+    time.sleep(20 + random.uniform(0, 10))  # 延长 + 随机防超时
+    for _ in range(8):  # 更多轮滚动
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(5 + random.uniform(0, 2))
+        time.sleep(5 + random.uniform(0, 3))
     
     try:
-        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
+        WebDriverWait(driver, 35).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
     except:
         print("等待超时")
     
@@ -105,7 +105,7 @@ df_sold = pd.concat([scrape_redfin(z, is_sold=True) for z in ZIPS], ignore_index
 
 print(f"✅ 总抓到在售 {len(df_sale)} 条，已售 {len(df_sold)} 条")
 
-# enrich（修复 KeyError：先为 df_sold 计算 'price_per_sqft'）
+# enrich
 def enrich_df(df, is_sold=False):
     if df.empty:
         return df
@@ -123,7 +123,7 @@ df_sale = enrich_df(df_sale)
 if not df_sale.empty and not df_sold.empty:
     avg_pps = df_sold['price_per_sqft'].mean()
     df_sale['avg_sold_price_per_sqft'] = round(avg_pps, 2)
-    df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
+    df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df['price']) / df_sale['price'] * 100).round(1)
     df_sale['nearby_comps_count'] = len(df_sold)
 
 # 写入

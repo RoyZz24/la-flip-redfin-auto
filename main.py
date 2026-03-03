@@ -46,7 +46,7 @@ def scrape_redfin(zip_code, is_sold=False):
     print(f"正在抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
     
     driver.get(url)
-    time.sleep(15 + random.uniform(0, 5))  # 随机延迟防反爬
+    time.sleep(15 + random.uniform(0, 5))
     for _ in range(6):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(5 + random.uniform(0, 2))
@@ -105,25 +105,26 @@ df_sold = pd.concat([scrape_redfin(z, is_sold=True) for z in ZIPS], ignore_index
 
 print(f"✅ 总抓到在售 {len(df_sale)} 条，已售 {len(df_sold)} 条")
 
-# enrich（修复 KeyError：对已售也计算 'price_per_sqft'）
+# enrich（修复 KeyError：先为 df_sold 计算 'price_per_sqft'）
 def enrich_df(df, is_sold=False):
     if df.empty:
         return df
     df = df.copy()
     df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0)
     df['sqft'] = pd.to_numeric(df['sqft'], errors='coerce').fillna(1)
-    df['price_per_sqft'] = (df['price'] / df['sqft']).round(2)  # 现在对所有 df 计算
+    df['price_per_sqft'] = (df['price'] / df['sqft']).round(2)  # 总是计算
     if not is_sold:
         df = df[(df['price'] <= MAX_PRICE) & (df['sqft'] >= MIN_LIVING_SQFT) & (df['beds'] >= MIN_BEDS) & (df['baths'] >= MIN_BATHS)]
-    if not df_sold.empty and not is_sold:
-        avg_pps = df_sold['price_per_sqft'].mean()
-        df['avg_sold_price_per_sqft'] = round(avg_pps, 2)
-        df['est_margin'] = ((avg_pps * df['sqft'] - df['price']) / df['price'] * 100).round(1)
-        df['nearby_comps_count'] = len(df_sold)
     return df
 
+df_sold = enrich_df(df_sold, is_sold=True)  # 先处理 df_sold
 df_sale = enrich_df(df_sale)
-df_sold = enrich_df(df_sold, is_sold=True)
+
+if not df_sale.empty and not df_sold.empty:
+    avg_pps = df_sold['price_per_sqft'].mean()
+    df_sale['avg_sold_price_per_sqft'] = round(avg_pps, 2)
+    df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
+    df_sale['nearby_comps_count'] = len(df_sold)
 
 # 写入
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]

@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import random
 from datetime import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -45,10 +46,10 @@ def scrape_redfin(zip_code, is_sold=False):
     print(f"正在抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
     
     driver.get(url)
-    time.sleep(15)  # 延长初始加载
-    for _ in range(6):  # 更多轮滚动
+    time.sleep(15 + random.uniform(0, 5))  # 随机延迟防反爬
+    for _ in range(6):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(5)
+        time.sleep(5 + random.uniform(0, 2))
     
     try:
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
@@ -104,14 +105,14 @@ df_sold = pd.concat([scrape_redfin(z, is_sold=True) for z in ZIPS], ignore_index
 
 print(f"✅ 总抓到在售 {len(df_sale)} 条，已售 {len(df_sold)} 条")
 
-# enrich
+# enrich（修复 KeyError：对已售也计算 'price_per_sqft'）
 def enrich_df(df, is_sold=False):
     if df.empty:
         return df
     df = df.copy()
     df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0)
     df['sqft'] = pd.to_numeric(df['sqft'], errors='coerce').fillna(1)
-    df['price_per_sqft'] = (df['price'] / df['sqft']).round(2)
+    df['price_per_sqft'] = (df['price'] / df['sqft']).round(2)  # 现在对所有 df 计算
     if not is_sold:
         df = df[(df['price'] <= MAX_PRICE) & (df['sqft'] >= MIN_LIVING_SQFT) & (df['beds'] >= MIN_BEDS) & (df['baths'] >= MIN_BATHS)]
     if not df_sold.empty and not is_sold:

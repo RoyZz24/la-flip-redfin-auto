@@ -46,13 +46,13 @@ def scrape_redfin(zip_code, is_sold=False):
     print(f"正在抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
     
     driver.get(url)
-    time.sleep(15 + random.uniform(0, 5))
-    for _ in range(6):
+    time.sleep(20 + random.uniform(0, 10))
+    for _ in range(8):
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(5 + random.uniform(0, 2))
+        time.sleep(5 + random.uniform(0, 3))
     
     try:
-        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
+        WebDriverWait(driver, 35).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
     except:
         print("等待超时")
     
@@ -112,7 +112,7 @@ def enrich_df(df, is_sold=False):
     df = df.copy()
     df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0)
     df['sqft'] = pd.to_numeric(df['sqft'], errors='coerce').fillna(1)
-    df['price_per_sqft'] = (df['price'] / df['sqft']).round(2)  # 总是计算
+    df['price_per_sqft'] = (df['price'] / df['sqft']).round(2)
     if not is_sold:
         df = df[(df['price'] <= MAX_PRICE) & (df['sqft'] >= MIN_LIVING_SQFT) & (df['beds'] >= MIN_BEDS) & (df['baths'] >= MIN_BATHS)]
     return df
@@ -126,7 +126,7 @@ if not df_sale.empty and not df_sold.empty:
     df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
     df_sale['nearby_comps_count'] = len(df_sold)
 
-# 写入（修复 "RAW" 错误：用 keyword 参数 valueInputOption='RAW'）
+# 写入（自动创建tab如果不存在）
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
@@ -134,10 +134,16 @@ client = gspread.authorize(creds)
 
 sheet = client.open("LA_Flip_Redfin_Auto")
 
-worksheet = sheet.worksheet("ForSale")
+try:
+    worksheet = sheet.worksheet("ForSale")
+except gspread.exceptions.WorksheetNotFound:
+    worksheet = sheet.add_worksheet(title="ForSale", rows=1000, cols=20)
 worksheet.append_rows([df_sale.columns.tolist()] + df_sale.values.tolist(), value_input_option='RAW') if not df_sale.empty else worksheet.append_rows([df_sale.columns.tolist()], value_input_option='RAW')
 
-worksheet = sheet.worksheet("Sold_Comps")
+try:
+    worksheet = sheet.worksheet("Sold_Comps")
+except gspread.exceptions.WorksheetNotFound:
+    worksheet = sheet.add_worksheet(title="Sold_Comps", rows=1000, cols=20)
 worksheet.append_rows([df_sold.columns.tolist()] + df_sold.values.tolist(), value_input_option='RAW') if not df_sold.empty else worksheet.append_rows([df_sold.columns.tolist()], value_input_option='RAW')
 
 print(f"🎉 {today} 写入完成！")

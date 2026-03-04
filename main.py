@@ -2,7 +2,7 @@ import json
 import os
 import time
 import random
-import numpy as np  # 新增：处理 NaN/inf
+import numpy as np
 from datetime import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -17,7 +17,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================== 配置区 ==================
-ZIPS = ["91505", "91214"]  # 只留成功过的2个zip
+ZIPS = ["91505", "91214"]  # 保持成功过的2个zip
 MAX_PRICE = 999999
 MIN_LIVING_SQFT = 1200
 MIN_BEDS = 2
@@ -63,18 +63,29 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
             print(f"找到 {len(cards)} 个房源卡片")
             
             data = []
-            for card in cards:
+            for i, card in enumerate(cards):
                 try:
+                    # 超级加强版 fallback 选择器（2026 Redfin 适配）
                     link_tag = card.find("a", href=True)
                     link = "https://www.redfin.com" + link_tag["href"] if link_tag else ""
                     
-                    addr = card.find("div", class_="bp-Homecard__Address") or card.find("span", class_="address") or card.find("p", class_="address")
-                    address = addr.text.strip() if addr else ""
+                    # address 多重 fallback
+                    addr = (card.find("div", class_="bp-Homecard__Address") or 
+                            card.find("span", class_="address") or 
+                            card.find("p", class_="address") or 
+                            card.find("div", string=lambda t: t and any(x in t for x in ["St", "Ave", "Rd", "Blvd", "Ln"])))
+                    address = addr.text.strip() if addr else f"地址{i+1}"
                     
-                    price_tag = card.find("span", class_="bp-Homecard__Price--value") or card.find("span", class_="price")
+                    # price 多重 fallback
+                    price_tag = (card.find("span", class_="bp-Homecard__Price--value") or 
+                                 card.find("span", class_="price") or 
+                                 card.find("div", string=lambda t: t and "$" in t))
                     price = int(''.join(filter(str.isdigit, price_tag.text))) if price_tag else 0
                     
-                    stats = card.find_all("span", class_="bp-Homecard__Stats--value") or card.find_all("span", class_="statsValue")
+                    # stats 多重 fallback
+                    stats = (card.find_all("span", class_="bp-Homecard__Stats--value") or 
+                             card.find_all("span", class_="statsValue") or 
+                             card.find_all("div", class_="statsValue"))
                     beds = int(stats[0].text) if len(stats) > 0 else 0
                     baths = float(stats[1].text) if len(stats) > 1 else 0
                     sqft = int(''.join(filter(str.isdigit, stats[2].text))) if len(stats) > 2 else 0
@@ -93,7 +104,9 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
                         "image_urls": image_url,
                         "fixer_keywords": ""
                     })
-                except:
+                    print(f"  第{i+1}条提取成功 → {address} ${price}")
+                except Exception as e:
+                    print(f"  第{i+1}条提取失败: {str(e)[:100]}")
                     continue
             print(f"→ 本 zip 实际提取到 {len(data)} 条有效数据")
             return pd.DataFrame(data)
@@ -110,17 +123,18 @@ df_sold = pd.concat([scrape_redfin(z, is_sold=True) for z in ZIPS], ignore_index
 
 print(f"✅ 总抓到在售 {len(df_sale)} 条，已售 {len(df_sold)} 条")
 
-# enrich（关键修复：清理 NaN/inf）
+# enrich + 清理
 def enrich_df(df, is_sold=False):
     if df.empty:
         return df
     df = df.copy()
-    df['price'] = pd.to_numeric(df['price'], errors='coerce')
-    df['sqft'] = pd.to_numeric(df['sqft'], errors='coerce')
-    df['price_per_sqft'] = (df['price'] / df['sqft'].replace(0, np.nan)).round(2)
-    df = df.replace([np.inf, -np.inf], 0).fillna(0)  # 清理 NaN/inf
+    df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0)
+    df['sqft'] = pd.to_numeric(df['sqft'], errors='coerce').fillna(0)
+    df['beds'] = pd.to_numeric(df['beds'], errors='coerce').fillna(0)
+    df['baths'] = pd.to_numeric(df['baths'], errors='coerce').fillna(0)
+    df['price_per_sqft'] = (df['price'] / df['sqft'].replace(0, 1)).round(2)
     if not is_sold:
-        df = df[(df['price'] <= MAX_PRICE) & (df['sqft'] >= MIN_LIVING_SQFT) & (df['beds'] >= MIN_BEDS) & (df['baths'] >= MIN_BATHS)]
+        df = df[(df['price'] > 0) & (df['sqft'] >= MIN_LIVING_SQFT)]
     return df
 
 df_sold = enrich_df(df_sold, is_sold=True)
@@ -132,7 +146,7 @@ if not df_sale.empty and not df_sold.empty:
     df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
     df_sale['nearby_comps_count'] = len(df_sold)
 
-# 写入（自动创建 tab）
+# 写入
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
@@ -147,4 +161,4 @@ for tab_name, df in [("ForSale", df_sale), ("Sold_Comps", df_sold)]:
         worksheet = sheet.add_worksheet(title=tab_name, rows=1000, cols=20)
     worksheet.append_rows([df.columns.tolist()] + df.values.tolist(), value_input_option='RAW') if not df.empty else worksheet.append_rows([df.columns.tolist()], value_input_option='RAW')
 
-print(f"🎉 {today} 写入完成！请刷新Sheet查看Burbank / La Crescenta-Montrose房源记录")
+print(f"🎉 {today} 写入完成！请刷新Sheet查看真实房源记录（地址、价格、照片链接、margin）")

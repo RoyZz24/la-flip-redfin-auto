@@ -16,7 +16,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================== 配置区 ==================
-ZIPS = ["91501", "91502", "91504", "91505", "91506", "91214"]  # Burbank + La Crescenta / La Crescenta-Montrose
+ZIPS = ["91505", "91214"]  # 只留之前成功过的2个zip，数据更稳定
 MAX_PRICE = 999999
 MIN_LIVING_SQFT = 1200
 MIN_BEDS = 2
@@ -30,74 +30,78 @@ def get_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
     options.add_argument("--disable-blink-features=AutomationControlled")
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=options)
 
-def scrape_redfin(zip_code, is_sold=False):
-    driver = get_driver()
-    filter_str = f"property-type=house,max-price={MAX_PRICE},min-sqft={MIN_LIVING_SQFT},min-beds={MIN_BEDS},min-baths={MIN_BATHS}"
-    if is_sold:
-        filter_str += ",include=sold-1yr"
-    url = f"https://www.redfin.com/zipcode/{zip_code}/filter/{filter_str}"
-    print(f"正在抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
-    
-    driver.get(url)
-    time.sleep(20 + random.uniform(0, 10))
-    for _ in range(8):
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(5 + random.uniform(0, 3))
-    
-    try:
-        WebDriverWait(driver, 35).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
-    except:
-        print("等待超时")
-    
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    driver.quit()
-    
-    cards = soup.find_all("div", class_="HomeCardContainer") or soup.find_all(attrs={"data-rf-test-id": "property-card"}) or soup.find_all("div", class_="card")
-    print(f"找到 {len(cards)} 个房源卡片")
-    
-    data = []
-    for card in cards:
+def scrape_redfin(zip_code, is_sold=False, retries=3):
+    for attempt in range(retries):
         try:
-            link_tag = card.find("a", href=True)
-            link = "https://www.redfin.com" + link_tag["href"] if link_tag else ""
+            driver = get_driver()
+            filter_str = f"property-type=house,max-price={MAX_PRICE},min-sqft={MIN_LIVING_SQFT},min-beds={MIN_BEDS},min-baths={MIN_BATHS}"
+            if is_sold:
+                filter_str += ",include=sold-1yr"
+            url = f"https://www.redfin.com/zipcode/{zip_code}/filter/{filter_str}"
+            print(f"第{attempt+1}次尝试抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
             
-            addr = card.find("div", class_="bp-Homecard__Address") or card.find("span", class_="address") or card.find("p", class_="address") or card.find("div", {"data-rf-test-name": "address"})
-            address = addr.text.strip() if addr else ""
+            driver.get(url)
+            time.sleep(25 + random.uniform(5, 15))  # 超长等待
+            for _ in range(10):  # 10轮滚动
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(6 + random.uniform(0, 3))
             
-            price_tag = card.find("span", class_="bp-Homecard__Price--value") or card.find("span", class_="price") or card.find("p", class_="price")
-            price = int(''.join(filter(str.isdigit, price_tag.text))) if price_tag else 0
+            WebDriverWait(driver, 40).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
             
-            stats = card.find_all("span", class_="bp-Homecard__Stats--value") or card.find_all("span", class_="statsValue") or card.find_all("div", class_="statsValue")
-            beds = int(stats[0].text) if len(stats) > 0 else 0
-            baths = float(stats[1].text) if len(stats) > 1 else 0
-            sqft = int(''.join(filter(str.isdigit, stats[2].text))) if len(stats) > 2 else 0
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            driver.quit()
             
-            img = card.find("img")
-            image_url = img["src"] if img else ""
+            cards = soup.find_all("div", class_="HomeCardContainer") or soup.find_all(attrs={"data-rf-test-id": "property-card"}) or soup.find_all("div", class_="card")
+            print(f"找到 {len(cards)} 个房源卡片")
             
-            data.append({
-                "date_scraped": today,
-                "address": address,
-                "price": price,
-                "sqft": sqft,
-                "beds": beds,
-                "baths": baths,
-                "link": link,
-                "image_urls": image_url,
-                "fixer_keywords": ""
-            })
-        except Exception as e:
-            print(f"提取卡片出错: {str(e)}")
+            data = []
+            for card in cards:
+                try:
+                    link_tag = card.find("a", href=True)
+                    link = "https://www.redfin.com" + link_tag["href"] if link_tag else ""
+                    
+                    addr = card.find("div", class_="bp-Homecard__Address") or card.find("span", class_="address") or card.find("p", class_="address")
+                    address = addr.text.strip() if addr else ""
+                    
+                    price_tag = card.find("span", class_="bp-Homecard__Price--value") or card.find("span", class_="price")
+                    price = int(''.join(filter(str.isdigit, price_tag.text))) if price_tag else 0
+                    
+                    stats = card.find_all("span", class_="bp-Homecard__Stats--value") or card.find_all("span", class_="statsValue")
+                    beds = int(stats[0].text) if len(stats) > 0 else 0
+                    baths = float(stats[1].text) if len(stats) > 1 else 0
+                    sqft = int(''.join(filter(str.isdigit, stats[2].text))) if len(stats) > 2 else 0
+                    
+                    img = card.find("img")
+                    image_url = img["src"] if img else ""
+                    
+                    data.append({
+                        "date_scraped": today,
+                        "address": address,
+                        "price": price,
+                        "sqft": sqft,
+                        "beds": beds,
+                        "baths": baths,
+                        "link": link,
+                        "image_urls": image_url,
+                        "fixer_keywords": ""
+                    })
+                except:
+                    continue
+            print(f"→ 本 zip 实际提取到 {len(data)} 条有效数据")
+            return pd.DataFrame(data)
+        except:
+            print(f"第{attempt+1}次失败，重试中...")
+            time.sleep(10)
             continue
-    print(f"→ 本 zip 实际提取到 {len(data)} 条有效数据")
-    return pd.DataFrame(data)
+    print(f"{zip_code} 3次尝试全部失败")
+    return pd.DataFrame()
 
 # 抓取
 df_sale = pd.concat([scrape_redfin(z) for z in ZIPS], ignore_index=True)
@@ -117,7 +121,7 @@ def enrich_df(df, is_sold=False):
         df = df[(df['price'] <= MAX_PRICE) & (df['sqft'] >= MIN_LIVING_SQFT) & (df['beds'] >= MIN_BEDS) & (df['baths'] >= MIN_BATHS)]
     return df
 
-df_sold = enrich_df(df_sold, is_sold=True)  # 先处理 df_sold
+df_sold = enrich_df(df_sold, is_sold=True)
 df_sale = enrich_df(df_sale)
 
 if not df_sale.empty and not df_sold.empty:
@@ -126,7 +130,7 @@ if not df_sale.empty and not df_sold.empty:
     df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
     df_sale['nearby_comps_count'] = len(df_sold)
 
-# 写入（自动创建tab如果不存在）
+# 写入（自动创建tab）
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
@@ -134,16 +138,11 @@ client = gspread.authorize(creds)
 
 sheet = client.open("LA_Flip_Redfin_Auto")
 
-try:
-    worksheet = sheet.worksheet("ForSale")
-except gspread.exceptions.WorksheetNotFound:
-    worksheet = sheet.add_worksheet(title="ForSale", rows=1000, cols=20)
-worksheet.append_rows([df_sale.columns.tolist()] + df_sale.values.tolist(), value_input_option='RAW') if not df_sale.empty else worksheet.append_rows([df_sale.columns.tolist()], value_input_option='RAW')
+for tab_name, df in [("ForSale", df_sale), ("Sold_Comps", df_sold)]:
+    try:
+        worksheet = sheet.worksheet(tab_name)
+    except:
+        worksheet = sheet.add_worksheet(title=tab_name, rows=1000, cols=20)
+    worksheet.append_rows([df.columns.tolist()] + df.values.tolist(), value_input_option='RAW') if not df.empty else worksheet.append_rows([df.columns.tolist()], value_input_option='RAW')
 
-try:
-    worksheet = sheet.worksheet("Sold_Comps")
-except gspread.exceptions.WorksheetNotFound:
-    worksheet = sheet.add_worksheet(title="Sold_Comps", rows=1000, cols=20)
-worksheet.append_rows([df_sold.columns.tolist()] + df_sold.values.tolist(), value_input_option='RAW') if not df_sold.empty else worksheet.append_rows([df_sold.columns.tolist()], value_input_option='RAW')
-
-print(f"🎉 {today} 写入完成！")
+print(f"🎉 {today} 写入完成！请刷新Sheet查看房源记录")

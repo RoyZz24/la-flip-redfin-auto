@@ -2,6 +2,7 @@ import json
 import os
 import time
 import random
+import numpy as np  # 新增：处理 NaN/inf
 from datetime import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -16,7 +17,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================== 配置区 ==================
-ZIPS = ["91505", "91214"]  # 只留之前成功过的2个zip，数据更稳定
+ZIPS = ["91505", "91214"]  # 只留成功过的2个zip
 MAX_PRICE = 999999
 MIN_LIVING_SQFT = 1200
 MIN_BEDS = 2
@@ -48,8 +49,8 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
             print(f"第{attempt+1}次尝试抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
             
             driver.get(url)
-            time.sleep(25 + random.uniform(5, 15))  # 超长等待
-            for _ in range(10):  # 10轮滚动
+            time.sleep(25 + random.uniform(5, 15))
+            for _ in range(10):
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(6 + random.uniform(0, 3))
             
@@ -109,14 +110,15 @@ df_sold = pd.concat([scrape_redfin(z, is_sold=True) for z in ZIPS], ignore_index
 
 print(f"✅ 总抓到在售 {len(df_sale)} 条，已售 {len(df_sold)} 条")
 
-# enrich
+# enrich（关键修复：清理 NaN/inf）
 def enrich_df(df, is_sold=False):
     if df.empty:
         return df
     df = df.copy()
-    df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0)
-    df['sqft'] = pd.to_numeric(df['sqft'], errors='coerce').fillna(1)
-    df['price_per_sqft'] = (df['price'] / df['sqft']).round(2)
+    df['price'] = pd.to_numeric(df['price'], errors='coerce')
+    df['sqft'] = pd.to_numeric(df['sqft'], errors='coerce')
+    df['price_per_sqft'] = (df['price'] / df['sqft'].replace(0, np.nan)).round(2)
+    df = df.replace([np.inf, -np.inf], 0).fillna(0)  # 清理 NaN/inf
     if not is_sold:
         df = df[(df['price'] <= MAX_PRICE) & (df['sqft'] >= MIN_LIVING_SQFT) & (df['beds'] >= MIN_BEDS) & (df['baths'] >= MIN_BATHS)]
     return df
@@ -130,7 +132,7 @@ if not df_sale.empty and not df_sold.empty:
     df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
     df_sale['nearby_comps_count'] = len(df_sold)
 
-# 写入（自动创建tab）
+# 写入（自动创建 tab）
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
@@ -145,4 +147,4 @@ for tab_name, df in [("ForSale", df_sale), ("Sold_Comps", df_sold)]:
         worksheet = sheet.add_worksheet(title=tab_name, rows=1000, cols=20)
     worksheet.append_rows([df.columns.tolist()] + df.values.tolist(), value_input_option='RAW') if not df.empty else worksheet.append_rows([df.columns.tolist()], value_input_option='RAW')
 
-print(f"🎉 {today} 写入完成！请刷新Sheet查看房源记录")
+print(f"🎉 {today} 写入完成！请刷新Sheet查看Burbank / La Crescenta-Montrose房源记录")

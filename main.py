@@ -2,6 +2,7 @@ import json
 import os
 import time
 import random
+import re  # 新增：正则匹配真实地址/价格
 import numpy as np
 from datetime import datetime
 import pandas as pd
@@ -65,30 +66,29 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
             data = []
             for i, card in enumerate(cards):
                 try:
-                    # 超级加强版 fallback 选择器（2026 Redfin 适配）
+                    text = card.get_text(separator=" | ", strip=True)  # 打印完整卡片文本调试
+                    if i < 3: print(f"  第{i+1}条卡片文本预览: {text[:200]}...")  # debug
+                    
+                    # 超强 fallback + 正则匹配
                     link_tag = card.find("a", href=True)
                     link = "https://www.redfin.com" + link_tag["href"] if link_tag else ""
                     
-                    # address 多重 fallback
-                    addr = (card.find("div", class_="bp-Homecard__Address") or 
-                            card.find("span", class_="address") or 
-                            card.find("p", class_="address") or 
-                            card.find("div", string=lambda t: t and any(x in t for x in ["St", "Ave", "Rd", "Blvd", "Ln"])))
-                    address = addr.text.strip() if addr else f"地址{i+1}"
+                    # address 正则 + 多 fallback
+                    addr_match = re.search(r'(\d+\s+[A-Za-z0-9\s]+(?:St|Ave|Rd|Blvd|Ln|Dr|Way|Ct))', text)
+                    address = addr_match.group(1) if addr_match else card.find("div", class_="bp-Homecard__Address") or card.find("span", class_="address") or f"地址{i+1}"
+                    address = address.text.strip() if hasattr(address, 'text') else str(address)
                     
-                    # price 多重 fallback
-                    price_tag = (card.find("span", class_="bp-Homecard__Price--value") or 
-                                 card.find("span", class_="price") or 
-                                 card.find("div", string=lambda t: t and "$" in t))
-                    price = int(''.join(filter(str.isdigit, price_tag.text))) if price_tag else 0
+                    # price 正则
+                    price_match = re.search(r'\$(\d{1,3}(?:,\d{3})*)', text)
+                    price = int(price_match.group(1).replace(',', '')) if price_match else 0
                     
-                    # stats 多重 fallback
-                    stats = (card.find_all("span", class_="bp-Homecard__Stats--value") or 
-                             card.find_all("span", class_="statsValue") or 
-                             card.find_all("div", class_="statsValue"))
-                    beds = int(stats[0].text) if len(stats) > 0 else 0
-                    baths = float(stats[1].text) if len(stats) > 1 else 0
-                    sqft = int(''.join(filter(str.isdigit, stats[2].text))) if len(stats) > 2 else 0
+                    # stats 正则
+                    beds_match = re.search(r'(\d+)\s*bds?', text, re.IGNORECASE)
+                    baths_match = re.search(r'(\d+\.?\d*)\s*ba', text, re.IGNORECASE)
+                    sqft_match = re.search(r'(\d{1,4})\s*sqft', text, re.IGNORECASE)
+                    beds = int(beds_match.group(1)) if beds_match else 0
+                    baths = float(baths_match.group(1)) if baths_match else 0
+                    sqft = int(sqft_match.group(1)) if sqft_match else 0
                     
                     img = card.find("img")
                     image_url = img["src"] if img else ""
@@ -104,7 +104,7 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
                         "image_urls": image_url,
                         "fixer_keywords": ""
                     })
-                    print(f"  第{i+1}条提取成功 → {address} ${price}")
+                    print(f"  第{i+1}条提取成功 → {address} ${price} ({beds}b/{baths}ba/{sqft}sqft)")
                 except Exception as e:
                     print(f"  第{i+1}条提取失败: {str(e)[:100]}")
                     continue
@@ -146,7 +146,7 @@ if not df_sale.empty and not df_sold.empty:
     df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
     df_sale['nearby_comps_count'] = len(df_sold)
 
-# 写入
+# 写入（只加一次表头）
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
@@ -159,6 +159,9 @@ for tab_name, df in [("ForSale", df_sale), ("Sold_Comps", df_sold)]:
         worksheet = sheet.worksheet(tab_name)
     except:
         worksheet = sheet.add_worksheet(title=tab_name, rows=1000, cols=20)
-    worksheet.append_rows([df.columns.tolist()] + df.values.tolist(), value_input_option='RAW') if not df.empty else worksheet.append_rows([df.columns.tolist()], value_input_option='RAW')
+    # 只加一次表头
+    if worksheet.row_count == 0 or worksheet.get_all_values() == []:
+        worksheet.append_row(df.columns.tolist())
+    worksheet.append_rows(df.values.tolist(), value_input_option='RAW') if not df.empty else None
 
-print(f"🎉 {today} 写入完成！请刷新Sheet查看真实房源记录（地址、价格、照片链接、margin）")
+print(f"🎉 {today} 写入完成！请刷新Sheet查看真实房源（地址、价格、照片链接、margin）")

@@ -2,7 +2,7 @@ import json
 import os
 import time
 import random
-import re  # 新增：正则匹配真实地址/价格
+import re
 import numpy as np
 from datetime import datetime
 import pandas as pd
@@ -18,7 +18,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================== 配置区 ==================
-ZIPS = ["91505", "91214"]  # 保持成功过的2个zip
+ZIPS = ["91505", "91214"]
 MAX_PRICE = 999999
 MIN_LIVING_SQFT = 1200
 MIN_BEDS = 2
@@ -66,29 +66,25 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
             data = []
             for i, card in enumerate(cards):
                 try:
-                    text = card.get_text(separator=" | ", strip=True)  # 打印完整卡片文本调试
-                    if i < 3: print(f"  第{i+1}条卡片文本预览: {text[:200]}...")  # debug
+                    text = card.get_text(separator=" | ", strip=True)
+                    if i < 3: print(f"  第{i+1}条卡片文本: {text[:250]}...")  # debug
                     
-                    # 超强 fallback + 正则匹配
                     link_tag = card.find("a", href=True)
                     link = "https://www.redfin.com" + link_tag["href"] if link_tag else ""
                     
-                    # address 正则 + 多 fallback
-                    addr_match = re.search(r'(\d+\s+[A-Za-z0-9\s]+(?:St|Ave|Rd|Blvd|Ln|Dr|Way|Ct))', text)
-                    address = addr_match.group(1) if addr_match else card.find("div", class_="bp-Homecard__Address") or card.find("span", class_="address") or f"地址{i+1}"
-                    address = address.text.strip() if hasattr(address, 'text') else str(address)
+                    # 加强正则匹配真实地址、beds、baths、sqft
+                    addr_match = re.search(r'(\d+\s+[A-Za-z0-9\s,]+(?:St|Ave|Rd|Blvd|Ln|Dr|Way|Ct|Pl))', text)
+                    address = addr_match.group(1) if addr_match else "未知地址"
                     
-                    # price 正则
-                    price_match = re.search(r'\$(\d{1,3}(?:,\d{3})*)', text)
-                    price = int(price_match.group(1).replace(',', '')) if price_match else 0
-                    
-                    # stats 正则
-                    beds_match = re.search(r'(\d+)\s*bds?', text, re.IGNORECASE)
-                    baths_match = re.search(r'(\d+\.?\d*)\s*ba', text, re.IGNORECASE)
-                    sqft_match = re.search(r'(\d{1,4})\s*sqft', text, re.IGNORECASE)
+                    beds_match = re.search(r'(\d+)\s*beds?', text, re.IGNORECASE)
+                    baths_match = re.search(r'(\d+\.?\d*)\s*baths?', text, re.IGNORECASE)
+                    sqft_match = re.search(r'(\d{1,4}(?:,\d{3})?)\s*sqft', text, re.IGNORECASE)
                     beds = int(beds_match.group(1)) if beds_match else 0
                     baths = float(baths_match.group(1)) if baths_match else 0
-                    sqft = int(sqft_match.group(1)) if sqft_match else 0
+                    sqft = int(sqft_match.group(1).replace(',', '')) if sqft_match else 0
+                    
+                    price_match = re.search(r'\$(\d{1,3}(?:,\d{3})*)', text)
+                    price = int(price_match.group(1).replace(',', '')) if price_match else 0
                     
                     img = card.find("img")
                     image_url = img["src"] if img else ""
@@ -104,9 +100,7 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
                         "image_urls": image_url,
                         "fixer_keywords": ""
                     })
-                    print(f"  第{i+1}条提取成功 → {address} ${price} ({beds}b/{baths}ba/{sqft}sqft)")
-                except Exception as e:
-                    print(f"  第{i+1}条提取失败: {str(e)[:100]}")
+                except:
                     continue
             print(f"→ 本 zip 实际提取到 {len(data)} 条有效数据")
             return pd.DataFrame(data)
@@ -114,16 +108,14 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
             print(f"第{attempt+1}次失败，重试中...")
             time.sleep(10)
             continue
-    print(f"{zip_code} 3次尝试全部失败")
     return pd.DataFrame()
 
-# 抓取
+# 抓取 + enrich
 df_sale = pd.concat([scrape_redfin(z) for z in ZIPS], ignore_index=True)
 df_sold = pd.concat([scrape_redfin(z, is_sold=True) for z in ZIPS], ignore_index=True)
 
 print(f"✅ 总抓到在售 {len(df_sale)} 条，已售 {len(df_sold)} 条")
 
-# enrich + 清理
 def enrich_df(df, is_sold=False):
     if df.empty:
         return df
@@ -134,7 +126,7 @@ def enrich_df(df, is_sold=False):
     df['baths'] = pd.to_numeric(df['baths'], errors='coerce').fillna(0)
     df['price_per_sqft'] = (df['price'] / df['sqft'].replace(0, 1)).round(2)
     if not is_sold:
-        df = df[(df['price'] > 0) & (df['sqft'] >= MIN_LIVING_SQFT)]
+        df = df[df['price'] > 0]
     return df
 
 df_sold = enrich_df(df_sold, is_sold=True)
@@ -146,7 +138,7 @@ if not df_sale.empty and not df_sold.empty:
     df_sale['est_margin'] = ((avg_pps * df_sale['sqft'] - df_sale['price']) / df_sale['price'] * 100).round(1)
     df_sale['nearby_comps_count'] = len(df_sold)
 
-# 写入（只加一次表头）
+# 写入（只加一次表头 + 去重）
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
@@ -159,9 +151,14 @@ for tab_name, df in [("ForSale", df_sale), ("Sold_Comps", df_sold)]:
         worksheet = sheet.worksheet(tab_name)
     except:
         worksheet = sheet.add_worksheet(title=tab_name, rows=1000, cols=20)
-    # 只加一次表头
-    if worksheet.row_count == 0 or worksheet.get_all_values() == []:
+    
+    existing = worksheet.get_all_values()
+    if not existing or existing[0] != df.columns.tolist():
         worksheet.append_row(df.columns.tolist())
-    worksheet.append_rows(df.values.tolist(), value_input_option='RAW') if not df.empty else None
+    
+    # 只添加数据（去重）
+    if not df.empty:
+        df = df.drop_duplicates(subset=['address', 'price'])
+        worksheet.append_rows(df.values.tolist(), value_input_option='RAW')
 
-print(f"🎉 {today} 写入完成！请刷新Sheet查看真实房源（地址、价格、照片链接、margin）")
+print(f"🎉 {today} 写入完成！请刷新Sheet查看真实房源")

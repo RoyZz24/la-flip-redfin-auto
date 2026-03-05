@@ -18,7 +18,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ================== 配置区 ==================
-ZIPS = ["91505", "91214"]
+ZIPS = ["burbank-ca", "la-crescenta-ca", "la-crescenta-montrose-ca"]  # Zillow 城市格式
 MAX_PRICE = 999999
 MIN_LIVING_SQFT = 1200
 MIN_BEDS = 2
@@ -39,15 +39,14 @@ def get_driver():
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=options)
 
-def scrape_redfin(zip_code, is_sold=False, retries=3):
+def scrape_zillow(city, is_sold=False, retries=3):
     for attempt in range(retries):
         try:
             driver = get_driver()
-            filter_str = f"property-type=house,max-price={MAX_PRICE},min-sqft={MIN_LIVING_SQFT},min-beds={MIN_BEDS},min-baths={MIN_BATHS}"
+            url = f"https://www.zillow.com/{city}/houses/{MIN_BEDS}_beds/{MIN_BATHS}_baths/?searchQueryState=%7B%22pagination%22%3A%7B%7D%2C%22usersSearchTerm%22%3A%22{city}%22%2C%22filterState%22%3A%7B%22price%22%3A%7B%22max%22%3A{MAX_PRICE}%7D%2C%22sqft%22%3A%7B%22min%22%3A{MIN_LIVING_SQFT}%7D%7D%7D"
             if is_sold:
-                filter_str += ",include=sold-1yr"
-            url = f"https://www.redfin.com/zipcode/{zip_code}/filter/{filter_str}"
-            print(f"第{attempt+1}次尝试抓取 {zip_code} {'已售' if is_sold else '在售'} → {url}")
+                url = url.replace("houses", "sold")
+            print(f"第{attempt+1}次尝试抓取 {city} {'已售' if is_sold else '在售'} → {url}")
             
             driver.get(url)
             time.sleep(25 + random.uniform(5, 15))
@@ -55,36 +54,29 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(6 + random.uniform(0, 3))
             
-            WebDriverWait(driver, 40).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.HomeCardContainer, .HomeCardContainer, [data-rf-test-id='property-card'], .card")))
+            WebDriverWait(driver, 40).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.list-card, article")))
             
             soup = BeautifulSoup(driver.page_source, "html.parser")
             driver.quit()
             
-            cards = soup.find_all("div", class_="HomeCardContainer") or soup.find_all(attrs={"data-rf-test-id": "property-card"}) or soup.find_all("div", class_="card")
+            cards = soup.find_all("div", class_="list-card") or soup.find_all("article")
             print(f"找到 {len(cards)} 个房源卡片")
             
             data = []
-            for i, card in enumerate(cards):
+            for card in cards:
                 try:
-                    text = card.get_text(separator=" | ", strip=True)
-                    if i < 3: print(f"  第{i+1}条卡片文本: {text[:250]}...")  # debug
+                    link_tag = card.find("a")
+                    link = "https://www.zillow.com" + link_tag["href"] if link_tag else ""
                     
-                    link_tag = card.find("a", href=True)
-                    link = "https://www.redfin.com" + link_tag["href"] if link_tag else ""
+                    address = card.find("address").text.strip() if card.find("address") else "未知地址"
                     
-                    # 加强正则匹配真实地址、beds、baths、sqft
-                    addr_match = re.search(r'(\d+\s+[A-Za-z0-9\s,]+(?:St|Ave|Rd|Blvd|Ln|Dr|Way|Ct|Pl))', text)
-                    address = addr_match.group(1) if addr_match else "未知地址"
+                    price_tag = card.find("span", class_="list-card-price")
+                    price = int(''.join(filter(str.isdigit, price_tag.text))) if price_tag else 0
                     
-                    beds_match = re.search(r'(\d+)\s*beds?', text, re.IGNORECASE)
-                    baths_match = re.search(r'(\d+\.?\d*)\s*baths?', text, re.IGNORECASE)
-                    sqft_match = re.search(r'(\d{1,4}(?:,\d{3})?)\s*sqft', text, re.IGNORECASE)
-                    beds = int(beds_match.group(1)) if beds_match else 0
-                    baths = float(baths_match.group(1)) if baths_match else 0
-                    sqft = int(sqft_match.group(1).replace(',', '')) if sqft_match else 0
-                    
-                    price_match = re.search(r'\$(\d{1,3}(?:,\d{3})*)', text)
-                    price = int(price_match.group(1).replace(',', '')) if price_match else 0
+                    stats = card.find_all("li")
+                    beds = int(stats[0].text) if len(stats) > 0 else 0
+                    baths = float(stats[1].text) if len(stats) > 1 else 0
+                    sqft = int(''.join(filter(str.isdigit, stats[2].text))) if len(stats) > 2 else 0
                     
                     img = card.find("img")
                     image_url = img["src"] if img else ""
@@ -102,7 +94,7 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
                     })
                 except:
                     continue
-            print(f"→ 本 zip 实际提取到 {len(data)} 条有效数据")
+            print(f"→ 本城市实际提取到 {len(data)} 条有效数据")
             return pd.DataFrame(data)
         except:
             print(f"第{attempt+1}次失败，重试中...")
@@ -110,12 +102,13 @@ def scrape_redfin(zip_code, is_sold=False, retries=3):
             continue
     return pd.DataFrame()
 
-# 抓取 + enrich
-df_sale = pd.concat([scrape_redfin(z) for z in ZIPS], ignore_index=True)
-df_sold = pd.concat([scrape_redfin(z, is_sold=True) for z in ZIPS], ignore_index=True)
+# 抓取
+df_sale = pd.concat([scrape_zillow(z) for z in ZIPS], ignore_index=True)
+df_sold = pd.concat([scrape_zillow(z, is_sold=True) for z in ZIPS], ignore_index=True)
 
 print(f"✅ 总抓到在售 {len(df_sale)} 条，已售 {len(df_sold)} 条")
 
+# enrich
 def enrich_df(df, is_sold=False):
     if df.empty:
         return df
@@ -151,12 +144,8 @@ for tab_name, df in [("ForSale", df_sale), ("Sold_Comps", df_sold)]:
         worksheet = sheet.worksheet(tab_name)
     except:
         worksheet = sheet.add_worksheet(title=tab_name, rows=1000, cols=20)
-    
-    existing = worksheet.get_all_values()
-    if not existing or existing[0] != df.columns.tolist():
+    if not worksheet.get_all_values():
         worksheet.append_row(df.columns.tolist())
-    
-    # 只添加数据（去重）
     if not df.empty:
         df = df.drop_duplicates(subset=['address', 'price'])
         worksheet.append_rows(df.values.tolist(), value_input_option='RAW')
